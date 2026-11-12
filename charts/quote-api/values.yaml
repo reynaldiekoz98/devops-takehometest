@@ -1,0 +1,34 @@
+image:
+  repository: ghcr.io/reynaldiekoz98/quote-api
+  tag: 438bb74        # git SHA of the commit on main the image was built from
+  pullPolicy: IfNotPresent
+
+service:
+  port: 80
+containerPort: 8080
+
+ingress:
+  enabled: true
+  className: traefik  # k3s default ingress controller
+  host: ""            # empty = match any host (curl localhost:<port>)
+
+# One Python process serves ~10 req/s (100ms CPU each), so scale on CPU early.
+resources:
+  requests: { cpu: 200m, memory: 64Mi }
+  limits:   { cpu: 500m, memory: 128Mi }
+
+autoscaling:
+  minReplicas: 3
+  maxReplicas: 8
+  targetCPUUtilizationPercentage: 70
+
+pdb:
+  maxUnavailable: 1
+
+placement:
+  capacityLabel: acme.io/capacity
+  spotWeight: 100
+  onDemandWeight: 10
+  # Max allowed difference in pod count between the spot and on-demand pools.
+  # 2 => with 3 replicas the third can't also go to spot, so >=1 lands on on-demand.
+  capacitySkew: 2

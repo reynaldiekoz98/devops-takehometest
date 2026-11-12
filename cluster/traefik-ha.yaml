@@ -1,0 +1,35 @@
+# Highly available ingress. k3s ships Traefik as a single replica, so draining the node it
+# runs on (e.g. a simulated spot reclaim) takes the whole ingress path down even though the
+# app pods are fine. Two replicas on different nodes plus a PDB keep it answering.
+# Traefik also keeps accepting connections for a few seconds after SIGTERM: the k3d load
+# balancer (nginx, max_fails=1 fail_timeout=10s) otherwise ejects every node for 10 s after
+# a single refused connection, turning a ~1 s routing blip into a ~10 s outage.
+# Applied by scripts/00-bootstrap.sh; k3s's helm controller re-renders the bundled chart.
+apiVersion: helm.cattle.io/v1
+kind: HelmChartConfig
+metadata:
+  name: traefik
+  namespace: kube-system
+spec:
+  valuesContent: |-
+    deployment:
+      replicas: 2
+    ports:
+      web:
+        transport:
+          lifeCycle:
+            requestAcceptGraceTimeout: 10s
+            graceTimeOut: 10s
+    podDisruptionBudget:
+      enabled: true
+      minAvailable: 1
+    affinity:
+      podAntiAffinity:
+        preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            podAffinityTerm:
+              topologyKey: kubernetes.io/hostname
+              labelSelector:
+                matchLabels:
+                  app.kubernetes.io/name: traefik
+                  app.kubernetes.io/instance: traefik-kube-system

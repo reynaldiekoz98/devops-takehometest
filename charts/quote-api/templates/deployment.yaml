@@ -1,0 +1,95 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: quote-api
+  labels: {{- include "quote-api.labels" . | nindent 4 }}
+spec:
+  # replicas is owned by the HPA (setting it here would fight ArgoCD and the HPA)
+  revisionHistoryLimit: 3
+  strategy:
+    type: RollingUpdate
+    rollingUpdate: { maxSurge: 1, maxUnavailable: 0 }
+  selector:
+    matchLabels: {{- include "quote-api.selector" . | nindent 6 }}
+  template:
+    metadata:
+      labels: {{- include "quote-api.labels" . | nindent 8 }}
+    spec:
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile: { type: RuntimeDefault }
+      affinity:
+        nodeAffinity:
+          # Only the spot/on-demand pools. The GPU node has no capacity label (and is tainted).
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: {{ .Values.placement.capacityLabel }}
+                    operator: In
+                    values: [spot, on-demand]
+          # Soft preferences: cost first (spot), but on-demand is always acceptable.
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: {{ .Values.placement.spotWeight }}
+              preference:
+                matchExpressions:
+                  - { key: {{ .Values.placement.capacityLabel }}, operator: In, values: [spot] }
+            - weight: {{ .Values.placement.onDemandWeight }}
+              preference:
+                matchExpressions:
+                  - { key: {{ .Values.placement.capacityLabel }}, operator: In, values: [on-demand] }
+      topologySpreadConstraints:
+        # Availability guarantee: spot can't outnumber on-demand by more than capacitySkew.
+        # Honor taints so a cordoned/drained node leaves the calculation instead of
+        # making replacement pods unschedulable.
+        - maxSkew: {{ .Values.placement.capacitySkew }}
+          topologyKey: {{ .Values.placement.capacityLabel }}
+          whenUnsatisfiable: DoNotSchedule
+          nodeAffinityPolicy: Honor
+          nodeTaintsPolicy: Honor
+          labelSelector:
+            matchLabels: {{- include "quote-api.selector" . | nindent 14 }}
+          matchLabelKeys: [pod-template-hash]
+        # Soft spread across individual nodes: never blocks scheduling.
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          nodeTaintsPolicy: Honor
+          labelSelector:
+            matchLabels: {{- include "quote-api.selector" . | nindent 14 }}
+          matchLabelKeys: [pod-template-hash]
+      containers:
+        - name: quote-api
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - { name: http, containerPort: {{ .Values.containerPort }} }
+          env:
+            - { name: PORT, value: {{ .Values.containerPort | quote }} }
+          resources: {{- toYaml .Values.resources | nindent 12 }}
+          # Probes are generous: under saturation the single-process app answers slowly.
+          startupProbe:
+            httpGet: { path: /healthz, port: http }
+            periodSeconds: 2
+            failureThreshold: 30
+          livenessProbe:
+            httpGet: { path: /healthz, port: http }
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
+          readinessProbe:
+            httpGet: { path: /readyz, port: http }
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: [ALL] }
+          volumeMounts:
+            - { name: tmp, mountPath: /tmp }
+      volumes:
+        - name: tmp
+          emptyDir: { sizeLimit: 16Mi }

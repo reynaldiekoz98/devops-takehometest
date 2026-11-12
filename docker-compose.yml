@@ -1,0 +1,45 @@
+# Brings up a local k3d cluster (1 server + 4 agents), labels the nodes with the
+# provided troubleshoot/prepare.sh, and starts a toolbox container with
+# kubectl / helm / terraform / k6. The scripts in ./scripts are bind-mounted.
+name: takehome
+
+services:
+  bootstrap:
+    image: takehome-toolbox:local
+    build: ./toolbox
+    restart: "no"
+    command: ["bash", "/scripts/00-bootstrap.sh"]
+    environment:
+      CLUSTER_NAME: takehome
+      AGENTS: "4"
+      HTTP_PORT: "${HTTP_PORT:-8080}"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./scripts:/scripts
+      - ./:/work
+      - kube:/kube
+    networks: [takehome-net]
+
+  toolbox:
+    image: takehome-toolbox:local
+    build: ./toolbox
+    command: ["sleep", "infinity"]
+    environment:
+      CLUSTER_NAME: takehome
+      HTTP_PORT: "${HTTP_PORT:-8080}"
+    depends_on:
+      bootstrap:
+        condition: service_completed_successfully
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./scripts:/scripts
+      - ./:/work
+      - kube:/kube
+    networks: [takehome-net]
+
+volumes:
+  kube:
+
+networks:
+  takehome-net:
+    name: takehome-net

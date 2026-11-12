@@ -1,0 +1,5 @@
+*:Zone.Identifier
+# local working material, not part of the submission
+devops-takehome-package/
+ASSIGNMENT*.md
+.claude/

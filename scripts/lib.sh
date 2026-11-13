@@ -12,7 +12,7 @@ if [ "${TOOLBOX:-}" != "1" ]; then
     echo ">> harness not running, starting it (docker compose up -d)"
     docker compose up -d
   fi
-  envs=(); for v in REPO_URL REVISION; do [ -n "${!v:-}" ] && envs+=(-e "$v=${!v}"); done
+  envs=(); for v in REPO_URL REVISION SHOW_BROKEN; do [ -n "${!v:-}" ] && envs+=(-e "$v=${!v}"); done
   exec docker compose exec -T "${envs[@]}" toolbox bash "/scripts/$(basename "$0")" "$@"
 fi
 

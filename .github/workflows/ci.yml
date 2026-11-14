@@ -4,6 +4,10 @@
 # never touches the cluster; its last job only records the new image tag in Git.
 #
 # WHEN IT RUNS: on a pull request into main, and only if the PR changes app/main.py or app/Dockerfile.
+#   Note: for pull_request, the `paths` filter looks at the WHOLE PR diff, not at the latest push. So once a PR touches
+#   the app, every later commit on the branch matches, including the commit this workflow pushes itself.
+#   Two guards stop that from looping (it did, on the first real run): the bump commit message carries [skip ci], and
+#   the first job is skipped when the run was started by github-actions[bot].
 #
 #   1. sast            : Semgrep scans the code                                  fails on ANY finding
 #   2. image           : build the image with its FINAL tag, Trivy-scan that image, and only if it passes
@@ -39,6 +43,8 @@ env:
 jobs:
   sast:
     name: 1. Scan the code (Semgrep)
+    # Loop guard #2: a run started by the workflow's own push is skipped, and so are the jobs that need this one.
+    if: github.actor != 'github-actions[bot]'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -135,8 +141,10 @@ jobs:
           ref: ${{ github.event.pull_request.head.ref }}
           fetch-depth: 0
 
-      # A commit pushed with the built-in GITHUB_TOKEN never triggers another workflow run, and the files changed
-      # here are not in this workflow's path filter, so this cannot loop.
+      # Loop guard #1: the commit message ends with [skip ci], which GitHub honours for the HEAD commit of a pull
+      # request, so no run is created for this commit. (A commit pushed with GITHUB_TOKEN does NOT reliably avoid new
+      # runs: on the first real run it created one, held for approval. The path filter does not help either, because
+      # for pull_request it is evaluated against the whole PR diff.)
       - name: Set the new image tag in the chart and commit it to the PR branch
         env:
           TAG: ${{ needs.image.outputs.tag }}
@@ -164,5 +172,5 @@ jobs:
           git config user.name "$ACTOR"
           git config user.email "${ACTOR_ID}+${ACTOR}@users.noreply.github.com"
           git add charts/quote-api/values.yaml charts/quote-api/Chart.yaml
-          git commit -m "ci: update quote-api image tag to ${TAG}"
+          git commit -m "ci: update quote-api image tag to ${TAG} [skip ci]"
           git push origin "HEAD:${BRANCH}"

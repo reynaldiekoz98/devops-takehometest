@@ -1,6 +1,6 @@
 image:
   repository: ghcr.io/reynaldiekoz98/quote-api
-  tag: 438bb74        # git SHA of the app commit the image was built from (updated by CI)
+  tag: 5a71d52        # git SHA of the app commit the image was built from (updated by CI)
   pullPolicy: IfNotPresent
 
 service:

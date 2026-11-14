@@ -1,0 +1,168 @@
+# CI for quote-api (migrated from the legacy GitLab pipeline; see MIGRATION-NOTES.md).
+#
+# This workflow is the CI half only. The CD half is ArgoCD (GitOps): it pulls from Git and deploys. This workflow
+# never touches the cluster; its last job only records the new image tag in Git.
+#
+# WHEN IT RUNS: on a pull request into main, and only if the PR changes app/main.py or app/Dockerfile.
+#
+#   1. sast            : Semgrep scans the code                                  fails on ANY finding
+#   2. image           : build the image with its FINAL tag, Trivy-scan that image, and only if it passes
+#                        push that same image to GHCR                            needs sast
+#   3. update-manifest : set that tag in charts/quote-api (values + Chart)       needs image; commits to the PR branch
+#
+# The image is built once, tagged from the start with the 7-character SHA of the PR's head commit (the exact app
+# commit that was scanned), and the image that Trivy scanned is the image that gets pushed.
+# After the PR is merged, ArgoCD syncs the chart from main and deploys the new tag.
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - app/main.py
+      - app/Dockerfile   # the Dockerfile defines the image as much as main.py does (e.g. OS security patches)
+
+# Least privilege: read-only by default; the two jobs that need more ask for it explicitly.
+permissions:
+  contents: read
+
+# A new commit on the PR cancels the older run.
+concurrency:
+  group: ci-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+env:
+  # Scanners run as container images at a fixed version (never `latest`).
+  SEMGREP_IMAGE: semgrep/semgrep:1.185.0
+  TRIVY_IMAGE: aquasec/trivy:0.76.2
+
+jobs:
+  sast:
+    name: 1. Scan the code (Semgrep)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      # Check out the PR's real head commit, not the synthetic merge commit, so what is scanned, built and tagged
+      # is one commit that exists in the repository history.
+      - name: Checkout
+        uses: actions/checkout@v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+
+      # No `continue-on-error` and no `|| true`: any finding fails the job (the legacy quality job could never fail).
+      # ONE rule is switched off on purpose: Semgrep's "mutable action tag" rule, because this project references
+      # actions by exact version tag (e.g. actions/checkout@v7.0.1) for readability. Pinning each action to a commit SHA
+      # is the stricter option and is what I would do in production (see MIGRATION-NOTES.md). Every other rule stays on.
+      - name: Semgrep (python, dockerfile, github-actions, secrets rule packs)
+        run: |
+          docker run --rm -v "$PWD:/src" -w /src "$SEMGREP_IMAGE" \
+            semgrep scan \
+              --config p/python --config p/dockerfile --config p/github-actions --config p/secrets \
+              --exclude-rule yaml.github-actions.security.github-actions-mutable-action-tag.github-actions-mutable-action-tag \
+              --metrics=off --error .
+
+  image:
+    name: 2. Build, scan (Trivy) and push the image
+    needs: [sast]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write   # needed only by the push step; the Trivy scan runs BEFORE the registry login
+    outputs:
+      tag: ${{ steps.vars.outputs.tag }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+
+      # The tag is the 7-character git SHA of this commit (never `latest`). The registry path must be lowercase.
+      - name: Work out the image name and tag
+        id: vars
+        run: |
+          set -euo pipefail
+          tag="$(git rev-parse --short=7 HEAD)"
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+          echo "IMAGE_REF=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/quote-api:${tag}" >> "$GITHUB_ENV"
+
+      # Built once, with its final name from the start. amd64 only, on purpose (see MIGRATION-NOTES.md).
+      # The `source` label is what links the GHCR package to this repository.
+      - name: Build the image (linux/amd64)
+        run: |
+          set -euo pipefail
+          docker build \
+            --label "org.opencontainers.image.source=https://github.com/${GITHUB_REPOSITORY}" \
+            --label "org.opencontainers.image.revision=$(git rev-parse HEAD)" \
+            -t "$IMAGE_REF" app
+
+      # Gate: HIGH and CRITICAL vulnerabilities that already have a fix. Unfixed ones are ignored on purpose,
+      # because nobody can act on them; they stay visible in the Trivy report if you remove the flag.
+      - name: Trivy (fails on fixable HIGH/CRITICAL)
+        run: |
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock "$TRIVY_IMAGE" \
+            image --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 --no-progress "$IMAGE_REF"
+
+      # Pull requests from forks get a read-only token and cannot push; they still get the scan above.
+      - name: Log in to GHCR
+        if: github.event.pull_request.head.repo.full_name == github.repository
+        uses: docker/login-action@v4.8.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Push the image that was just scanned
+        if: github.event.pull_request.head.repo.full_name == github.repository
+        run: docker push "$IMAGE_REF"
+
+  update-manifest:
+    name: 3. Update the quote-api manifest (the image tag)
+    needs: [image]
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write   # to commit the new tag to the PR branch
+    steps:
+      # Check out the PR branch itself (not a detached commit) so the change can be pushed back to it.
+      # Full history, because the check below compares the branch with the commit the image was built from.
+      - name: Checkout the PR branch
+        uses: actions/checkout@v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.ref }}
+          fetch-depth: 0
+
+      # A commit pushed with the built-in GITHUB_TOKEN never triggers another workflow run, and the files changed
+      # here are not in this workflow's path filter, so this cannot loop.
+      - name: Set the new image tag in the chart and commit it to the PR branch
+        env:
+          TAG: ${{ needs.image.outputs.tag }}
+          BUILT_COMMIT: ${{ github.event.pull_request.head.sha }}
+          BRANCH: ${{ github.event.pull_request.head.ref }}
+          ACTOR: ${{ github.actor }}
+          ACTOR_ID: ${{ github.actor_id }}
+        run: |
+          set -euo pipefail
+          # Only bump if the app is unchanged since the image was built. The branch may have newer commits (our own
+          # earlier bump, or a docs fix); what must not happen is the manifest pointing at an image of old app code.
+          if ! git cat-file -e "${BUILT_COMMIT}^{commit}" 2>/dev/null || ! git diff --quiet "$BUILT_COMMIT" HEAD -- app; then
+            echo "The app changed after this image was built; refusing to point the manifest at a stale image." >&2
+            exit 1
+          fi
+          sed -i -E "s|^(  tag: )[^ #]+|\1${TAG}|" charts/quote-api/values.yaml
+          sed -i -E "s|^(appVersion: ).*|\1\"${TAG}\"|" charts/quote-api/Chart.yaml
+          grep -q "^  tag: ${TAG}" charts/quote-api/values.yaml
+          grep -q "^appVersion: \"${TAG}\"" charts/quote-api/Chart.yaml
+          if git diff --quiet; then
+            echo "The manifest already uses ${TAG}; nothing to commit."
+            exit 0
+          fi
+          # The commit is attributed to whoever triggered the run, using GitHub's standard noreply address.
+          git config user.name "$ACTOR"
+          git config user.email "${ACTOR_ID}+${ACTOR}@users.noreply.github.com"
+          git add charts/quote-api/values.yaml charts/quote-api/Chart.yaml
+          git commit -m "ci: update quote-api image tag to ${TAG}"
+          git push origin "HEAD:${BRANCH}"

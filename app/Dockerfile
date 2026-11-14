@@ -7,6 +7,8 @@ RUN python -m py_compile main.py
 
 FROM python:3.12-alpine
 ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 PORT=8080
+# Pick up OS security fixes published after the base image was built (CI's Trivy gate fails on fixable HIGH/CRITICAL).
+RUN apk upgrade --no-cache
 RUN addgroup -g 10001 -S app && adduser -u 10001 -S -G app -H -s /sbin/nologin app
 WORKDIR /app
 COPY --from=build /src/main.py .

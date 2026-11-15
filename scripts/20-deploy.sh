@@ -20,14 +20,14 @@ log "installing ArgoCD $ARGOCD_VERSION"
 kubectl create namespace argocd --dry-run=client -o yaml | kubectl apply -f - >/dev/null
 kubectl apply -n argocd --server-side --force-conflicts \
   -f "https://raw.githubusercontent.com/argoproj/argo-cd/${ARGOCD_VERSION}/manifests/install.yaml" >/dev/null
-kubectl -n argocd rollout status deploy/argocd-repo-server deploy/argocd-server deploy/argocd-applicationset-controller --timeout=300s
-kubectl -n argocd rollout status statefulset/argocd-application-controller --timeout=300s
+wait_ready 900 argocd deploy/argocd-repo-server deploy/argocd-server deploy/argocd-applicationset-controller statefulset/argocd-application-controller
 
 log "applying the Application (repo: $REPO_URL @ $REVISION)"
 envsubst '${REPO_URL} ${REVISION}' < argocd/application.yaml.tpl | kubectl apply -f -
 
 log "waiting for the Application to be Synced + Healthy"
-for _ in $(seq 1 90); do
+# 600s max (120 x 5s); the app image is small, but it is pulled over the same slow link.
+for _ in $(seq 1 120); do
   sync="$(kubectl -n argocd get app quote-api -o jsonpath='{.status.sync.status}' 2>/dev/null || true)"
   health="$(kubectl -n argocd get app quote-api -o jsonpath='{.status.health.status}' 2>/dev/null || true)"
   echo "   sync=${sync:-?} health=${health:-?}"
@@ -36,6 +36,7 @@ for _ in $(seq 1 90); do
 done
 if [ "$sync" != Synced ] || [ "$health" != Healthy ]; then
   kubectl -n argocd get app quote-api -o jsonpath='{.status.conditions}' ; echo
+  slow_net_fail "the quote-api Application" 600
   exit 1
 fi
 

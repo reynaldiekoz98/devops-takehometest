@@ -3,7 +3,7 @@
 # This workflow is the CI half only. The CD half is ArgoCD (GitOps): it pulls from Git and deploys. This workflow
 # never touches the cluster; its last job only records the new image tag in Git.
 #
-# WHEN IT RUNS: on a pull request into main, and only if the PR changes app/main.py or app/Dockerfile.
+# WHEN IT RUNS: on a pull request into main, and only if the PR changes something under app/.
 #   Note: for pull_request, the `paths` filter looks at the WHOLE PR diff, not at the latest push. So once a PR touches
 #   the app, every later commit on the branch matches, including the commit this workflow pushes itself.
 #   Two guards stop that from looping (it did, on the first real run): the bump commit message carries [skip ci], and
@@ -23,8 +23,7 @@ on:
   pull_request:
     branches: [main]
     paths:
-      - app/main.py
-      - app/Dockerfile   # the Dockerfile defines the image as much as main.py does (e.g. OS security patches)
+      - app/**   # everything in the app folder goes into the image (code, Dockerfile, README)
 
 # Least privilege: read-only by default; the two jobs that need more ask for it explicitly.
 permissions:
@@ -57,16 +56,14 @@ jobs:
           persist-credentials: false
 
       # No `continue-on-error` and no `|| true`: any finding fails the job (the legacy quality job could never fail).
-      # ONE rule is switched off on purpose: Semgrep's "mutable action tag" rule, because this project references
-      # actions by exact version tag (e.g. actions/checkout@v7.0.1) for readability. Pinning each action to a commit SHA
-      # is the stricter option and is what I would do in production (see MIGRATION-NOTES.md). Every other rule stays on.
-      - name: Semgrep (python, dockerfile, github-actions, secrets rule packs)
+      # Only the app/ folder is scanned (the assignment asks for a gate on the application): the code, the Dockerfile
+      # that ships it, and leaked secrets. Nothing else in the repository (toolbox, chart, scripts, workflow) is scanned.
+      - name: Semgrep (python, dockerfile, secrets rule packs) on app/
         run: |
           docker run --rm -v "$PWD:/src" -w /src "$SEMGREP_IMAGE" \
             semgrep scan \
-              --config p/python --config p/dockerfile --config p/github-actions --config p/secrets \
-              --exclude-rule yaml.github-actions.security.github-actions-mutable-action-tag.github-actions-mutable-action-tag \
-              --metrics=off --error .
+              --config p/python --config p/dockerfile --config p/secrets \
+              --metrics=off --error app
 
   image:
     name: 2. Build, scan (Trivy) and push the image

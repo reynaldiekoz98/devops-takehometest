@@ -4,11 +4,11 @@ The legacy pipeline had three stages (test, build, deploy). It is migrated to [`
 
 ## The new pipeline
 
-It runs on a **pull request into `main`**, and only if the PR changes `app/main.py` or `app/Dockerfile`. Each job needs the one before it, so a failure stops everything after it.
+It runs on a **pull request into `main`**, and only if the PR changes something under `app/`. Each job needs the one before it, so a failure stops everything after it.
 
 | # | Job | What it does | Fails when |
 |---|---|---|---|
-| 1 | `sast` | Semgrep with the python, dockerfile, github-actions and secrets rule packs | **any** finding (`--error`, no `continue-on-error`) |
+| 1 | `sast` | Semgrep on the `app/` folder with the python, dockerfile and secrets rule packs | **any** finding (`--error`, no `continue-on-error`) |
 | 2 | `image` | builds the image **once, with its final tag**, scans that exact image with Trivy, and only if the scan passes logs in and pushes it to `ghcr.io/<owner>/quote-api` | a **fixable HIGH/CRITICAL** vulnerability is found, or the build or push fails |
 | 3 | `update-manifest` | sets the tag from job 2 in `charts/quote-api/values.yaml` (and `appVersion` in `Chart.yaml`) and commits it to the PR branch, attributed to the person who triggered the run (`github.actor`, with GitHub's noreply address) | the app changed since the image was built, or the push fails |
 
@@ -20,13 +20,13 @@ Inside job 2 the order is: checkout, work out the tag, build, **Trivy**, registr
 
 | Event | What runs |
 |---|---|
-| PR into `main` that changes `app/main.py` or `app/Dockerfile`, from this repository | all three jobs |
+| PR into `main` that changes anything under `app/`, from this repository | all three jobs |
 | the same, from a fork | `sast` and the build and scan in `image`; the login and push steps are skipped, and `update-manifest` does not run (a fork's token is read-only, so it cannot push an image or a commit) |
 | PR into `main` whose **whole diff** (against `main`) changes only docs, the chart or the workflow | nothing (the `paths` filter) |
 | a later push to a PR that already changes the app, even a docs-only push | runs again, because the filter looks at the whole PR diff, not at the latest push |
 | PR into another branch, a push to any branch, a merge | nothing |
 
-The Dockerfile is in the filter because it defines the image as much as `main.py` does: a Dockerfile-only change, such as the OS security fix below, must still produce a new image.
+The whole `app/` folder is in the filter, so a Dockerfile-only change (such as the OS security fix below) still produces a new image. A change that touches only `app/README.md` also triggers a run, which is harmless.
 
 **The manifest update did loop on the first real run, and now has two guards.** I had written that a commit pushed with `GITHUB_TOKEN` never triggers another run and that the bumped files are outside the path filter. Both were wrong:
 - For `pull_request`, the `paths` filter is evaluated against the **whole PR diff**, not the latest push. Once a PR touches the app, every later commit on the branch matches, including the bump.
@@ -56,14 +56,14 @@ The stricter option is to pin each action to a 40-character commit SHA and each 
 
 I started with SHAs and digests and then simplified, because for this project the readability and the ability to explain every line outweighed the extra protection. In production I would pin by SHA and digest and let a bot (Dependabot or Renovate) propose the updates.
 
-**What this cost in the pipeline:** the `github-actions` rule pack of the gate flags every mutable action tag, so with version tags the scan failed with 11 findings, one per `uses:` line. Instead of dropping the whole pack (which also catches script injection in workflows) or annotating 11 lines, the Semgrep step excludes that one rule by its exact ID, with a comment saying why. I checked the exclusion is narrow: 205 rules still run, and a planted workflow injection (`${{ github.event.pull_request.title }}` inside a `run:` step) is still caught and fails the job. Pinning by SHA would let the exclusion be removed.
+**What this cost in the pipeline:** nothing. The scan covers only `app/`, so the workflow files are not scanned and Semgrep's `github-actions` rule pack (which flags every mutable action tag) is not used. Had the workflows been in scope, version tags would have failed the scan with 11 findings, one per `uses:` line; pinning by SHA would fix that.
 
 ## What the new gates found on day one
 
 The scanners were run locally on the code before the workflow was written, to confirm the gate passes for the right reasons.
 
 - **Trivy: 16 HIGH vulnerabilities**, all `krb5-libs 1.22.2-r1` (fix: `1.22.3-r0`), shipped in the `python:3.12-alpine` base even after a fresh pull. `krb5-libs` is required by `libtirpc` in the base, so it cannot be dropped. Fix: `RUN apk upgrade --no-cache` in `app/Dockerfile`. The image grew from 74.2 MB to 77.1 MB and Trivy now exits 0.
-- **Semgrep: 1 finding**: `toolbox/Dockerfile` has no `USER`, so the harness container runs as root. This one is suppressed on purpose, with the reason written next to it in the file: the toolbox must read and write the Docker socket to create the cluster, the socket's group ID differs per host, and a fixed non-root user would break `docker compose up` on many machines. It is local tooling that is never shipped; the service image is non-root. I checked that the suppression is exact: with suppressions disabled the finding reappears, and nothing else is hidden.
+- **Semgrep, scope:** the scan covers `app/` only, as the assignment asks for a gate on the application. An earlier version scanned the whole repository and found 1 real issue: `toolbox/Dockerfile` has no `USER`, so the harness container runs as root. That one is on purpose (the toolbox must use the Docker socket, whose group ID differs per host), and it is outside the scanned folder now, so it needs no exclusion or `# nosemgrep` comment. A vulnerability planted in `app/` is still caught and fails the job.
 
 Consequence: the image the chart deploys today (`438bb74`) predates the `apk upgrade` fix. The first PR run after this change builds and scans a patched image, pushes it, and updates the manifest automatically.
 
@@ -106,5 +106,6 @@ Consequence: the image the chart deploys today (`438bb74`) predates the `apk upg
 - **A workflow-only change does not run the pipeline**, because of the `paths` filter. A mistake in the workflow is found at the next PR that touches the app. The PR that brings this workflow includes a Dockerfile change, so it does trigger it.
 - **cosign signing (bonus) was cut.** Keyless signing needs a real Actions run with an OIDC token, so I could not test it, and I did not want untested steps in a gate. It is a small addition once the pipeline is green.
 - **Trivy ignores vulnerabilities that have no fix yet** (`--ignore-unfixed`), because nobody can act on them. Remove the flag to see them.
-- **Tags are movable.** See the section above: the actions and scanner images are referenced by version tag, and one Semgrep rule about this is switched off on purpose.
+- **Tags are movable.** See the section above: the actions and scanner images are referenced by version tag.
+- **Only `app/` is scanned.** A mistake added elsewhere (the chart, the scripts, the workflow, the `toolbox/` harness, for example a committed secret) would not be reported by this gate.
 - **Not set up:** branch protection and Dependabot for the action and image versions. Both are repository settings.

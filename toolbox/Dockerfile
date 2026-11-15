@@ -1,3 +1,7 @@
+# The toolbox runs as root on purpose: k3d must read/write /var/run/docker.sock to create the cluster's
+# containers, and that socket's group ID differs on every host, so a fixed non-root user would break
+# `docker compose up` on many machines. This is local tooling, never shipped; the service image is non-root.
+# nosemgrep: dockerfile.security.missing-user.missing-user
 # syntax=docker/dockerfile:1
 # Toolbox: everything the scripts need, so the reviewer's host only needs Docker.
 FROM debian:12-slim
@@ -26,8 +30,4 @@ RUN set -eux; \
 
 ENV KUBECONFIG=/kube/config TOOLBOX=1
 WORKDIR /work
-# The toolbox runs as root on purpose: k3d must read/write /var/run/docker.sock to create the cluster's
-# containers, and that socket's group ID differs on every host, so a fixed non-root user would break
-# `docker compose up` on many machines. This is local tooling, never shipped; the service image is non-root.
-# nosemgrep: dockerfile.security.missing-user.missing-user
 CMD ["sleep", "infinity"]

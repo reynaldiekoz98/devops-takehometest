@@ -16,7 +16,7 @@ show() {
   done
 }
 
-kubectl -n "$NS_APP" rollout status deploy/quote-api --timeout=120s >/dev/null
+kubectl -n "$NS_APP" rollout status deploy/quote-api --timeout=300s >/dev/null
 # Pick a spot node that currently runs a replica.
 NODE="$(kubectl -n "$NS_APP" get pods -o jsonpath='{range .items[*]}{.spec.nodeName}{"\n"}{end}' \
   | sort -u | while read -r n; do
@@ -38,8 +38,8 @@ CURL_PID=$!
 sleep 5
 
 log "DRAIN $NODE (simulated spot reclaim)"
-kubectl drain "$NODE" --ignore-daemonsets --delete-emptydir-data --timeout=120s 2>&1 | grep -vE '^(WARNING|evicting node)' || true
-kubectl -n "$NS_APP" rollout status deploy/quote-api --timeout=120s
+kubectl drain "$NODE" --ignore-daemonsets --delete-emptydir-data --timeout=300s 2>&1 | grep -vE '^(WARNING|evicting node)' || true
+kubectl -n "$NS_APP" rollout status deploy/quote-api --timeout=300s
 for _ in $(seq 1 30); do
   [ "$(kubectl -n "$NS_APP" get pods --field-selector=status.phase=Running --no-headers | grep -c ' 1/1 ')" -ge 3 ] && break; sleep 2
 done

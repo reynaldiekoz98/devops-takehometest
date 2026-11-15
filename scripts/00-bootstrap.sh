@@ -17,7 +17,7 @@ else
     --port "${HTTP_PORT}:80@loadbalancer" \
     --k3s-arg "--tls-san=k3d-${CLUSTER_NAME}-serverlb@server:0" \
     --kubeconfig-update-default=false --kubeconfig-switch-context=false \
-    --wait --timeout 300s
+    --wait --timeout 900s
 fi
 
 log "writing kubeconfig to $KUBECONFIG"
@@ -27,7 +27,7 @@ kubectl config set-cluster "k3d-$CLUSTER_NAME" --server="https://k3d-${CLUSTER_N
 chmod 600 "$KUBECONFIG"
 
 log "waiting for all nodes Ready"
-kubectl wait --for=condition=Ready node --all --timeout=180s
+kubectl wait --for=condition=Ready node --all --timeout=600s
 
 log "labelling/tainting nodes (provided troubleshoot/prepare.sh)"
 sh /work/troubleshoot/prepare.sh
@@ -35,10 +35,12 @@ sh /work/troubleshoot/prepare.sh
 log "making the ingress controller (Traefik) highly available (cluster/traefik-ha.yaml)"
 kubectl apply -f /work/cluster/traefik-ha.yaml
 # k3s re-renders its bundled chart asynchronously; wait until 2 replicas are ready on the new revision.
-for _ in $(seq 1 60); do
+# Up to 900s (300 x 3s): on a slow network the Traefik images are still downloading. A line is printed every 30s.
+for i in $(seq 1 300); do
   [ "$(kubectl -n kube-system get deploy traefik -o jsonpath='{.status.readyReplicas}' 2>/dev/null)" = 2 ] \
     && [ "$(kubectl -n kube-system get deploy traefik -o jsonpath='{.status.updatedReplicas}' 2>/dev/null)" = 2 ] && break
+  [ $((i % 10)) = 0 ] && echo "   still waiting for traefik ($((i * 3))s of 900s): images may still be downloading"
   sleep 3
 done
-kubectl -n kube-system rollout status deploy/traefik --timeout=120s
+kubectl -n kube-system rollout status deploy/traefik --timeout=300s
 kubectl -n kube-system get pods -l app.kubernetes.io/name=traefik -o custom-columns='POD:.metadata.name,NODE:.spec.nodeName,STATUS:.status.phase'

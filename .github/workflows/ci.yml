@@ -23,7 +23,8 @@ on:
   pull_request:
     branches: [main]
     paths:
-      - app/**   # everything in the app folder goes into the image (code, Dockerfile, README)
+      - app/main.py
+      - app/Dockerfile   # the Dockerfile defines the image as much as main.py does (e.g. OS security patches)
 
 # Least privilege: read-only by default; the two jobs that need more ask for it explicitly.
 permissions:

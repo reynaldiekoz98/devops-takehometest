@@ -4,11 +4,11 @@ The legacy pipeline had three stages (test, build, deploy). It is migrated to [`
 
 ## The new pipeline
 
-It runs on a **pull request into `main`**, and only if the PR changes something under `app/`. Each job needs the one before it, so a failure stops everything after it.
+It runs on **every pull request into `main`**. The scan always runs; the image jobs run only if the PR changed `app/main.py` or `app/Dockerfile`. Each job needs the one before it, so a failure stops everything after it.
 
 | # | Job | What it does | Fails when |
 |---|---|---|---|
-| 1 | `sast` | Semgrep on the `app/` folder with the python, dockerfile and secrets rule packs | **any** finding (`--error`, no `continue-on-error`) |
+| 1 | `sast` | Semgrep on the whole repository with the python, dockerfile, github-actions and secrets rule packs | **any** finding (`--error`, no `continue-on-error`) |
 | 2 | `image` | builds the image **once, with its final tag**, scans that exact image with Trivy, and only if the scan passes logs in and pushes it to `ghcr.io/<owner>/quote-api` | a **fixable HIGH/CRITICAL** vulnerability is found, or the build or push fails |
 | 3 | `update-manifest` | sets the tag from job 2 in `charts/quote-api/values.yaml` (and `appVersion` in `Chart.yaml`) and commits it to the PR branch, attributed to the person who triggered the run (`github.actor`, with GitHub's noreply address) | the app changed since the image was built, or the push fails |
 
@@ -20,16 +20,16 @@ Inside job 2 the order is: checkout, work out the tag, build, **Trivy**, registr
 
 | Event | What runs |
 |---|---|
-| PR into `main` that changes anything under `app/`, from this repository | all three jobs |
+| PR into `main` that changes `app/main.py` or `app/Dockerfile`, from this repository | all three jobs |
 | the same, from a fork | `sast` and the build and scan in `image`; the login and push steps are skipped, and `update-manifest` does not run (a fork's token is read-only, so it cannot push an image or a commit) |
-| PR into `main` whose **whole diff** (against `main`) changes only docs, the chart or the workflow | nothing (the `paths` filter) |
-| a later push to a PR that already changes the app, even a docs-only push | runs again, because the filter looks at the whole PR diff, not at the latest push |
+| any other PR into `main` (docs, chart, scripts, workflow, `app/README.md`) | `sast` only; `image` and `update-manifest` show as skipped |
+| a later push to a PR that already changes the app, even a docs-only push | runs all jobs again, because the check looks at the whole PR diff, not at the latest push |
 | PR into another branch, a push to any branch, a merge | nothing |
 
-The whole `app/` folder is in the filter, so a Dockerfile-only change (such as the OS security fix below) still produces a new image. A change that touches only `app/README.md` also triggers a run, which is harmless.
+Only the two files that go into the image decide whether it is built. The scan itself does not depend on what changed, so every PR gets it. The decision is made in the `sast` job (`git diff --name-only base...head`), and the later jobs are gated on its output.
 
 **The manifest update did loop on the first real run, and now has two guards.** I had written that a commit pushed with `GITHUB_TOKEN` never triggers another run and that the bumped files are outside the path filter. Both were wrong:
-- For `pull_request`, the `paths` filter is evaluated against the **whole PR diff**, not the latest push. Once a PR touches the app, every later commit on the branch matches, including the bump.
+- The app-changed check compares the **whole PR diff** with `main`, not the latest push (the same was true of the `paths` filter used in an earlier version). Once a PR touches the app, every later commit on the branch matches, including the bump.
 - GitHub did create a run for the bot's push (held for approval, which is the "workflow awaiting approval" prompt). Approving it made it bump again, which created the next run, and so on. The approval prompt was the only thing stopping an endless chain.
 
 The guards: (1) the bump commit message ends with `[skip ci]`, which GitHub honours for the head commit of a pull request, so no run is created for it; (2) the first job is skipped when the run was started by `github-actions[bot]`, and the jobs that need it are skipped with it. The second guard is a safety net in case the first is ever removed.
@@ -44,7 +44,7 @@ The guards: (1) the bump commit message ends with `[skip ci]`, which GitHub hono
 | Docker-in-Docker (`docker:20.10-dind`) and `docker login -u ... -p ...` | Privileged service container; the password lands in the process list and logs | A plain `docker build` on a hosted runner, `docker/login-action` (reads the token from a secret, not the command line) |
 | Image pushed only as `:latest` | Mutable; no traceability; no rollback target | Git SHA tag, pushed only after it passed the scans |
 | `deploy_prod`: `kubectl set image` with a kubeconfig written to `/tmp` from a variable, `bitnami/kubectl:1.24` | CI holds production credentials; imperative deploy drifts from Git; very old tooling | **GitOps.** CI only edits the image tag in Git (job 3); ArgoCD deploys from Git. CI holds no cluster credentials at all |
-| `only: master` for every job | Everything ran on every push; no feedback before merging and no notion of what changed | Runs on the PR, so the gates can block a merge, and only when the app changed (`paths` filter) |
+| `only: master` for every job | Everything ran on every push; no feedback before merging and no notion of what changed | Runs on every PR, so the scan can block a merge; the image is built and scanned only when `app/main.py` or `app/Dockerfile` changed |
 | Floating tags (`docker:20.10`, `bitnami/kubectl:1.24`); no image scan | Different tool next month; vulnerabilities unseen | Scanners and actions are referenced by an **exact version** (`aquasec/trivy:0.76.2`, `actions/checkout@v7.0.1`), never `latest` or a floating major; Trivy gate. See the note below on tags versus SHAs |
 | No permissions model | Default token can write | Workflow default `contents: read`; only the `image` job has `packages: write` (used by the push step, after the scan) and only `update-manifest` has `contents: write`; `persist-credentials: false` on every checkout that does not push |
 
@@ -56,14 +56,14 @@ The stricter option is to pin each action to a 40-character commit SHA and each 
 
 I started with SHAs and digests and then simplified, because for this project the readability and the ability to explain every line outweighed the extra protection. In production I would pin by SHA and digest and let a bot (Dependabot or Renovate) propose the updates.
 
-**What this cost in the pipeline:** nothing. The scan covers only `app/`, so the workflow files are not scanned and Semgrep's `github-actions` rule pack (which flags every mutable action tag) is not used. Had the workflows been in scope, version tags would have failed the scan with 11 findings, one per `uses:` line; pinning by SHA would fix that.
+**What this cost in the pipeline:** the `github-actions` rule pack of the gate flags every mutable action tag, so with version tags the scan failed with 11 findings, one per `uses:` line. Instead of dropping the whole pack (which also catches script injection in workflows) or annotating 11 lines, the Semgrep step excludes that one rule by its exact ID, with a comment saying why. Every other rule stays on (205 rules run). Pinning by SHA would let the exclusion be removed.
 
 ## What the new gates found on day one
 
 The scanners were run locally on the code before the workflow was written, to confirm the gate passes for the right reasons.
 
 - **Trivy: 16 HIGH vulnerabilities**, all `krb5-libs 1.22.2-r1` (fix: `1.22.3-r0`), shipped in the `python:3.12-alpine` base even after a fresh pull. `krb5-libs` is required by `libtirpc` in the base, so it cannot be dropped. Fix: `RUN apk upgrade --no-cache` in `app/Dockerfile`. The image grew from 74.2 MB to 77.1 MB and Trivy now exits 0.
-- **Semgrep, scope:** the scan covers `app/` only, as the assignment asks for a gate on the application. An earlier version scanned the whole repository and found 1 real issue: `toolbox/Dockerfile` has no `USER`, so the harness container runs as root. That one is on purpose (the toolbox must use the Docker socket, whose group ID differs per host), and it is outside the scanned folder now, so it needs no exclusion or `# nosemgrep` comment. A vulnerability planted in `app/` is still caught and fails the job.
+- **Semgrep: 1 finding**: `toolbox/Dockerfile` has no `USER`, so the harness container runs as root. It is real, and it is on purpose: the toolbox must read and write the Docker socket to create the cluster, and the socket's group ID differs per host, so a fixed non-root user would break `docker compose up` on many machines. The toolbox is local tooling for the test harness and is never shipped (the service image is non-root). It is suppressed with a `# nosemgrep: dockerfile.security.missing-user.missing-user` comment placed directly above the `CMD` line, with the reason next to it. That comment only covers the line right after it, so it must stay there; if it is moved, the scan fails again, which is the safe direction.
 
 Consequence: the image the chart deploys today (`438bb74`) predates the `apk upgrade` fix. The first PR run after this change builds and scans a patched image, pushes it, and updates the manifest automatically.
 
@@ -103,9 +103,9 @@ Consequence: the image the chart deploys today (`438bb74`) predates the `apk upg
 - **No automated tests run in CI.** The legacy test stage was dropped rather than ported. What stops a broken image from replacing a working one after the merge is the chart itself: a readiness probe, and a rolling update that never takes a pod away before its replacement is ready (`maxUnavailable: 0`). Real unit tests are the next step.
 - **The tag is the PR head commit.** With a normal merge commit that commit stays in `main`'s history. With a squash merge it does not (the squash creates a new commit), though the image still traces back to the PR.
 - **Nothing runs after the merge.** The checks ran on the PR's head commit, not on the merge result, so if `main` moved in the meantime the combination is not re-checked.
-- **A workflow-only change does not run the pipeline**, because of the `paths` filter. A mistake in the workflow is found at the next PR that touches the app. The PR that brings this workflow includes a Dockerfile change, so it does trigger it.
+- **A workflow-only change runs the scan but not the image jobs**, so a mistake in the build or push steps is only found at the next PR that touches the app. The PR that brings this workflow includes a Dockerfile change, so it does trigger it.
 - **cosign signing (bonus) was cut.** Keyless signing needs a real Actions run with an OIDC token, so I could not test it, and I did not want untested steps in a gate. It is a small addition once the pipeline is green.
 - **Trivy ignores vulnerabilities that have no fix yet** (`--ignore-unfixed`), because nobody can act on them. Remove the flag to see them.
-- **Tags are movable.** See the section above: the actions and scanner images are referenced by version tag.
-- **Only `app/` is scanned.** A mistake added elsewhere (the chart, the scripts, the workflow, the `toolbox/` harness, for example a committed secret) would not be reported by this gate.
+- **Tags are movable.** See the section above: the actions and scanner images are referenced by version tag, and one Semgrep rule about this is switched off on purpose.
+- **Semgrep covers the whole repository, but only with the rule packs listed.** It does not scan Helm templates or shell scripts beyond what those packs include, and Trivy scans only the application image, not the toolbox image.
 - **Not set up:** branch protection and Dependabot for the action and image versions. Both are repository settings.

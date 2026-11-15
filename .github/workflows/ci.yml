@@ -3,16 +3,19 @@
 # This workflow is the CI half only. The CD half is ArgoCD (GitOps): it pulls from Git and deploys. This workflow
 # never touches the cluster; its last job only records the new image tag in Git.
 #
-# WHEN IT RUNS: on a pull request into main, and only if the PR changes something under app/.
-#   Note: for pull_request, the `paths` filter looks at the WHOLE PR diff, not at the latest push. So once a PR touches
-#   the app, every later commit on the branch matches, including the commit this workflow pushes itself.
+# WHEN IT RUNS: on EVERY pull request into main.
+#   1. sast            : Semgrep scans the whole repository                      fails on ANY finding; always runs
+#                        It also checks whether the PR changed app/main.py or app/Dockerfile.
+#   2. image           : only if one of those two files changed: build the image with its FINAL tag, Trivy-scan that
+#                        image, and only if it passes push that same image to GHCR           needs sast
+#   3. update-manifest : set that tag in charts/quote-api (values + Chart)       needs image; commits to the PR branch
+#
+# So a docs-only PR gets the scan and nothing else; a PR that touches the app gets the full pipeline. If the app
+# files did not change, jobs 2 and 3 are skipped (shown as "skipped", not failed).
+#   Note: the app check looks at the WHOLE PR diff, not at the latest push. So once a PR touches the app, every later
+#   commit on the branch builds again, including the commit this workflow pushes itself.
 #   Two guards stop that from looping (it did, on the first real run): the bump commit message carries [skip ci], and
 #   the first job is skipped when the run was started by github-actions[bot].
-#
-#   1. sast            : Semgrep scans the code                                  fails on ANY finding
-#   2. image           : build the image with its FINAL tag, Trivy-scan that image, and only if it passes
-#                        push that same image to GHCR                            needs sast
-#   3. update-manifest : set that tag in charts/quote-api (values + Chart)       needs image; commits to the PR branch
 #
 # The image is built once, tagged from the start with the 7-character SHA of the PR's head commit (the exact app
 # commit that was scanned), and the image that Trivy scanned is the image that gets pushed.
@@ -22,9 +25,6 @@ name: CI
 on:
   pull_request:
     branches: [main]
-    paths:
-      - app/main.py
-      - app/Dockerfile   # the Dockerfile defines the image as much as main.py does (e.g. OS security patches)
 
 # Least privilege: read-only by default; the two jobs that need more ask for it explicitly.
 permissions:
@@ -47,6 +47,8 @@ jobs:
     if: github.actor != 'github-actions[bot]'
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    outputs:
+      app_changed: ${{ steps.changes.outputs.app_changed }}
     steps:
       # Check out the PR's real head commit, not the synthetic merge commit, so what is scanned, built and tagged
       # is one commit that exists in the repository history.
@@ -54,21 +56,45 @@ jobs:
         uses: actions/checkout@v7.0.1
         with:
           ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0   # the next step compares the PR with its base commit
           persist-credentials: false
 
+      # Did this PR change the application image? Only these two files go into it. Compares the PR's head with the
+      # point where it branched off main (three dots), i.e. exactly the files the PR changes.
+      - name: Did the PR change app/main.py or app/Dockerfile?
+        id: changes
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          files="$(git diff --name-only "$BASE...$HEAD")"
+          echo "$files"
+          if grep -qxE 'app/main\.py|app/Dockerfile' <<< "$files"; then
+            echo "app_changed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "app_changed=false" >> "$GITHUB_OUTPUT"
+            echo "The app image is unchanged: the image jobs are skipped."
+          fi
+
       # No `continue-on-error` and no `|| true`: any finding fails the job (the legacy quality job could never fail).
-      # Only the app/ folder is scanned (the assignment asks for a gate on the application): the code, the Dockerfile
-      # that ships it, and leaked secrets. Nothing else in the repository (toolbox, chart, scripts, workflow) is scanned.
-      - name: Semgrep (python, dockerfile, secrets rule packs) on app/
+      # The whole repository is scanned. ONE rule is switched off on purpose: Semgrep's "mutable action tag" rule,
+      # because this project references actions by exact version tag (e.g. actions/checkout@v7.0.1) for readability.
+      # Pinning each action to a commit SHA is the stricter option and is what I would do in production (see
+      # MIGRATION-NOTES.md). Every other rule stays on. The one finding in toolbox/Dockerfile (runs as root, on purpose)
+      # is suppressed with a `# nosemgrep` comment that explains why, right above the line it covers.
+      - name: Semgrep (python, dockerfile, github-actions, secrets rule packs)
         run: |
           docker run --rm -v "$PWD:/src" -w /src "$SEMGREP_IMAGE" \
             semgrep scan \
-              --config p/python --config p/dockerfile --config p/secrets \
-              --metrics=off --error app
+              --config p/python --config p/dockerfile --config p/github-actions --config p/secrets \
+              --exclude-rule yaml.github-actions.security.github-actions-mutable-action-tag.github-actions-mutable-action-tag \
+              --metrics=off --error .
 
   image:
     name: 2. Build, scan (Trivy) and push the image
     needs: [sast]
+    if: needs.sast.outputs.app_changed == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:

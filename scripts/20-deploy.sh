@@ -26,7 +26,7 @@ log "applying the Application (repo: $REPO_URL @ $REVISION)"
 envsubst '${REPO_URL} ${REVISION}' < argocd/application.yaml.tpl | kubectl apply -f -
 
 log "waiting for the Application to be Synced + Healthy"
-# 600s max (120 x 5s); the app image is small, but it is pulled over the same slow link.
+# Up to 600s (120 x 5s); the app image is pulled from GHCR, so a slow network can delay it.
 for _ in $(seq 1 120); do
   sync="$(kubectl -n argocd get app quote-api -o jsonpath='{.status.sync.status}' 2>/dev/null || true)"
   health="$(kubectl -n argocd get app quote-api -o jsonpath='{.status.health.status}' 2>/dev/null || true)"

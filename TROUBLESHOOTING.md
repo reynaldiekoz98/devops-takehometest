@@ -12,9 +12,9 @@ SHOW_BROKEN=1 ./scripts/30-troubleshoot.sh     # apply the broken manifest first
 
 **Rules respected:** the `default-deny` NetworkPolicy is kept (three narrow allow rules are added next to it), and node labels and taints were never touched. `verify.sh` checks both, and the node taint was re-read at the end: `[{"effect":"NoSchedule","key":"nvidia.com/gpu","value":"true"}]`.
 
-## How I worked
+## Approach
 
-I applied `broken-app.yaml` unchanged and fixed one thing at a time, re-checking after each fix. One broken thing often hides the next: for example the Service port problem could not be seen until the pods were Ready. The order below is the order Kubernetes revealed them.
+`broken-app.yaml` was applied unchanged, and the faults were fixed one at a time with a re-check after each fix. One broken thing often hides the next: for example the Service port problem could not be seen until the pods were Ready. The order below is the order Kubernetes revealed them.
 
 The commands are plain `kubectl` against the `troubleshoot` namespace. Run them from the toolbox (`docker compose exec toolbox ...`) or from the host with a kubeconfig.
 
@@ -126,7 +126,7 @@ kubectl -n troubleshoot get deploy web -o jsonpath='{range .spec.template.spec.c
 ```
 Event: `Readiness probe failed: Get "http://10.42.4.9:8080/": dial tcp 10.42.4.9:8080: connect: connection refused`. nginx's config says `listen 80;`. The Deployment: `containerPort=80 liveness=8080 readiness=8080`.
 
-**Root cause.** nginx listens on 80 (and `containerPort` says 80), but both probes check port 8080. The failing readiness probe keeps the pod out of the Service. The liveness probe uses the same wrong port, so the kubelet would eventually kill and restart the container too. (In this run the pod was replaced by the next rollout before I saw a restart. An earlier run of mine showed `3 restarts` on a pod after about 80 seconds.)
+**Root cause.** nginx listens on 80 (and `containerPort` says 80), but both probes check port 8080. The failing readiness probe keeps the pod out of the Service. The liveness probe uses the same wrong port, so the kubelet would eventually kill and restart the container too. (In the final run the pod was replaced by the next rollout before a restart showed up. An earlier run showed `3 restarts` on a pod after about 80 seconds.)
 
 **Fix.** Both probes: `port: 80`. The rollout then completes with `web` 2/2 Ready.
 
@@ -157,7 +157,7 @@ curl: (7) Failed to connect to web-svc.troubleshoot.svc.cluster.local port 80 af
 FAIL: smoke test failed (check NetworkPolicy/DNS/Service path)
 ```
 
-**Diagnosis.** The message does not say which layer is blocked, so I tested each layer from a long-lived pod that carries the smoke client's label, `app=smoke-client`:
+**Diagnosis.** The message does not say which layer is blocked, so each layer was tested from a long-lived pod that carries the smoke client's label, `app=smoke-client`:
 ```bash
 kubectl -n troubleshoot get networkpolicy default-deny -o jsonpath='{.spec}{"\n"}'
 kubectl -n troubleshoot run dbg --image=curlimages/curl:8.7.1 --restart=Never --labels=app=smoke-client --command -- sleep 900
@@ -176,7 +176,7 @@ kubectl -n troubleshoot exec dbg -- curl -s -m 4 -o /dev/null -w 'http=%{http_co
 2. Egress from the client to the `web` pods.
 3. Ingress into the `web` pods from the client.
 
-**Why the smoke job's log was misleading.** It says `Couldn't connect`, which suggests DNS worked. It did, but only for the first moment. I measured two things:
+**Why the smoke job's log was misleading.** It says `Couldn't connect`, which suggests DNS worked. It did, but only for the first moment. Two measurements show this:
 - A brand-new pod can resolve DNS for about the first second, then the policy takes effect (`t+0s RESOLVES`, then `blocked` from `t+1s`).
 - Five separate curl processes, one per second, from a new pod: `t+0s Couldn't connect`, then `Resolving timed out` for every later one.
 
@@ -216,6 +216,6 @@ PASS
 
 ## Notes
 
-- One `web` replica was scheduled on the control-plane node (`k3d-takehome-server-0`). k3s servers are schedulable by default, so this is not a fault in the manifest. In production I would keep application pods off control-plane nodes.
+- One `web` replica was scheduled on the control-plane node (`k3d-takehome-server-0`). k3s servers are schedulable by default, so this is not a fault in the manifest. In production, application pods should be kept off control-plane nodes.
 - While rolling out fixes, old ReplicaSets keep their pods (`Pending` or `ImagePullBackOff`) until a newer revision becomes Ready. If a rollout looks stuck, inspect the **newest** pod, not the old ones.
-- `scripts/lib.sh` originally forwarded only `REPO_URL` and `REVISION` into the toolbox, so `SHOW_BROKEN=1` was silently ignored when a script ran from the host. I found this while testing the script and added `SHOW_BROKEN` to the forwarded variables.
+- `scripts/lib.sh` originally forwarded only `REPO_URL` and `REVISION` into the toolbox, so `SHOW_BROKEN=1` was silently ignored when a script ran from the host. This showed up while testing the script, and `SHOW_BROKEN` is now in the forwarded variables.

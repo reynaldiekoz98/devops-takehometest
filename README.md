@@ -20,8 +20,24 @@ Then, from the host:
 curl http://localhost:8080/api/quote
 ```
 
-Time: about 6 minutes on a fast connection and 15 to 20 minutes on a slow one, because every image is pulled from the
-internet inside the new cluster. `run-all.sh` prints a progress line every 30 seconds while it waits.
+### How long it takes
+
+The best run so far, from a clean start (no cluster, images not yet pulled inside the cluster):
+
+| Step | Time |
+|---|---|
+| `docker compose up -d` (cluster, nodes, Traefik) | 82 seconds |
+| `./scripts/run-all.sh`: ArgoCD ready | about 2 minutes (it printed 4 progress lines, 30 s apart, then the pods were ready) |
+| `./scripts/run-all.sh`: deploy, drill (84 of 84 requests succeeded) and Part 3 `verify.sh` | the rest, ending in `PASS` and `ALL DONE` |
+
+Measured on a laptop: AMD Ryzen 7 8845HS (8 cores, 16 threads), about 20 GB of RAM, Windows with WSL2
+(Ubuntu 24.04; WSL sees 16 CPUs and about 9.6 GB), Docker 29.6, on a home internet connection.
+
+**This is the best case, and the time depends mostly on the internet speed while the images are pulled.** Every image is
+downloaded from the internet inside the new cluster (k3s, Traefik, ArgoCD, nginx and the app). On a slower connection the same run has
+sometimes taken 15 to 20 minutes, for example with ArgoCD alone needing about 10 minutes, so the scripts wait up to 15 minutes
+per step and print a progress line every 30 seconds instead of looking frozen. A second run is much faster because the images are already on the nodes.
+If a step still stops with the "download failed or too slow" message, run `./scripts/run-all.sh` again.
 
 Needs: Docker (with Compose v2), free port 8080 (change it with `HTTP_PORT=9090 docker compose up -d`), and about
 6 GB of free memory. The cluster is removed with `k3d cluster delete takehome && docker compose down -v`.
@@ -82,12 +98,12 @@ After the merge, ArgoCD deploys that tag. See `MIGRATION-NOTES.md`.
 | Path | What it is |
 |---|---|
 | `app/` | The service (`main.py`, standard library only) and its multi-stage, non-root Dockerfile |
-| `charts/quote-api/` | My own Helm chart: probes, requests/limits, non-root read-only rootfs, Service, Ingress, HPA (min 3), PDB, placement |
+| `charts/quote-api/` | The Helm chart (written from scratch): probes, requests/limits, non-root read-only rootfs, Service, Ingress, HPA (min 3), PDB, placement |
 | `argocd/application.yaml.tpl` | The ArgoCD `Application` (repo URL and revision are filled in by `20-deploy.sh`) |
 | `cluster/traefik-ha.yaml` | Makes the built-in Traefik run 2 replicas so a node drain cannot cut the ingress |
 | `docker-compose.yml`, `toolbox/` | The harness: bootstrap job plus the toolbox container |
 | `scripts/` | The numbered task scripts (below) |
-| `troubleshoot/` | The provided files plus my `fixed-app.yaml` |
+| `troubleshoot/` | The provided files plus `fixed-app.yaml` (the fixed manifests) |
 | `.github/workflows/ci.yml` | The GitHub Actions pipeline (Part 4) |
 | `TROUBLESHOOTING.md`, `MIGRATION-NOTES.md`, `OPS-ANSWERS.md`, `AI-USAGE.md` | Write-ups |
 
@@ -110,7 +126,7 @@ All scripts are idempotent. Run on the host, each one re-runs itself inside the 
   spread over the capacity label with `maxSkew: 2` and `DoNotSchedule` means three pods cannot all sit on spot, so at least
   one lands on the on-demand node. The per-host spread is soft (`ScheduleAnyway`), so rescheduling still works when a node
   disappears. A hard per-host spread would leave pods Pending during the drill.
-- **Traefik runs 2 replicas.** My first drill got 12% successful requests: the single Traefik pod was on the drained node and
+- **Traefik runs 2 replicas.** The first drill got only 12% successful requests: the single Traefik pod was on the drained node and
   the k3d load balancer takes a node out for 10 seconds after one refused connection. Two replicas with anti-affinity, a PDB and
   a short accept grace period fixed it; five drills in a row gave 100%.
 - **ArgoCD syncs from GitHub `main`.** A reviewer's clone points at this repository, so ArgoCD pulls the chart from there. Set

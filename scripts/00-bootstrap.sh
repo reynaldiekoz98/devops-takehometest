@@ -34,8 +34,8 @@ sh /work/troubleshoot/prepare.sh
 
 log "making the ingress controller (Traefik) highly available (cluster/traefik-ha.yaml)"
 kubectl apply -f /work/cluster/traefik-ha.yaml
-# k3s re-renders its bundled chart asynchronously; wait until 2 replicas are ready on the new revision.
-# Up to 900s (300 x 3s): on a slow network the Traefik images are still downloading. A line is printed every 30s.
+# k3s applies the config asynchronously (the Traefik Deployment may not exist yet on a fresh cluster).
+# Wait up to 900s for 2 ready replicas on the new revision; a slow network is the usual reason it takes long.
 for i in $(seq 1 300); do
   [ "$(kubectl -n kube-system get deploy traefik -o jsonpath='{.status.readyReplicas}' 2>/dev/null)" = 2 ] \
     && [ "$(kubectl -n kube-system get deploy traefik -o jsonpath='{.status.updatedReplicas}' 2>/dev/null)" = 2 ] && break

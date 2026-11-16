@@ -7,7 +7,7 @@ A small HTTP API written in Python using only the standard library (no dependenc
 | `GET /healthz` | Liveness: the process is alive | `200 {"status":"ok"}` |
 | `GET /readyz` | Readiness: it can take traffic. Returns `503` after SIGTERM. | `200 {"ready": true}` |
 | `GET /metrics` | Prometheus text format | `quote_api_requests_total{path="/api/quote",status="200"} 3` |
-| `GET /api/quote` | Random quote, with about 100 ms of real CPU work | `200 {"quote": "...", "pod": "<hostname>"}` |
+| `GET /api/quote` | Random quote, with about 100 ms of real CPU work | `200 {"quote": "...", "pod": "<hostname>", "version": "<git SHA>"}` |
 | anything else | Not found | `404 {"error":"not found"}` |
 
 Environment variables: `PORT` (default `8080`) and `WORK_SECONDS` (default `0.1`, the CPU time burned per `/api/quote`).
@@ -27,6 +27,7 @@ Environment variables: `PORT` (default `8080`) and `WORK_SECONDS` (default `0.1`
 **`Handler.do_GET()`.** The router. It matches the path and answers:
 - `/healthz` always returns 200.
 - `/readyz` returns 200 while `ready` is set, otherwise 503.
+- `/api/quote` also returns a `version` field: the `APP_VERSION` environment variable. The Dockerfile sets it from the `GIT_SHA` build argument, and CI passes the same 7-character SHA that tags the image (`version` for a local build without the argument).
 - `/metrics` returns the text from `render_metrics()`.
 - `/api/quote` calls `burn_cpu()`, then returns a random quote plus the `HOSTNAME` (the pod name in Kubernetes, so you can see which replica answered).
 - Anything else returns 404, recorded under the path label `other` so random URLs can't create unlimited metric labels.
@@ -58,7 +59,7 @@ python3 main.py              # listens on :8080; stop with Ctrl+C
 
 ```bash
 cd app
-docker build -t quote-api:local .
+docker build -t quote-api:local .          # add --build-arg GIT_SHA=$(git rev-parse --short=7 HEAD) to set the version field of /api/quote
 docker run -d --name quote-test --read-only -p 8080:8080 quote-api:local
 ```
 

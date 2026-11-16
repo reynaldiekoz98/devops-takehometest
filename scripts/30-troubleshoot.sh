@@ -13,8 +13,8 @@ fi
 log "applying troubleshoot/fixed-app.yaml"
 kubectl apply -f troubleshoot/fixed-app.yaml
 
-# verify.sh (provided, not edited) waits only 60s per deployment. On a slow network the first image pull alone can take
-# longer, so wait here first. This returns at once when the pods are already ready, so a fast run loses no time.
+# The provided verify.sh waits only 60s per deployment, which a first image pull can exceed. Wait here first;
+# this returns at once when the pods are already ready.
 log "waiting for the pods to be ready (up to 900s; slow image pulls)"
 wait_ready 900 troubleshoot deploy/web deploy/ai-inference || true
 

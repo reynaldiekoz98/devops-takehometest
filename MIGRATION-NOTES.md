@@ -28,13 +28,13 @@ Inside job 2 the order is: checkout, work out the tag, build, **Trivy**, registr
 
 Only the two files that go into the image decide whether it is built. The scan itself does not depend on what changed, so every PR gets it. The decision is made in the `sast` job (`git diff --name-only base...head`), and the later jobs are gated on its output.
 
-**The manifest update did loop on the first real run, and now has two guards.** I had written that a commit pushed with `GITHUB_TOKEN` never triggers another run and that the bumped files are outside the path filter. Both were wrong:
+**The manifest update did loop on the first real run, and now has two guards.** An early version assumed that a commit pushed with `GITHUB_TOKEN` never triggers another run and that the bumped files are outside the path filter. Both assumptions were wrong:
 - The app-changed check compares the **whole PR diff** with `main`, not the latest push (the same was true of the `paths` filter used in an earlier version). Once a PR touches the app, every later commit on the branch matches, including the bump.
 - GitHub did create a run for the bot's push (held for approval, which is the "workflow awaiting approval" prompt). Approving it made it bump again, which created the next run, and so on. The approval prompt was the only thing stopping an endless chain.
 
 The guards: (1) the bump commit message ends with `[skip ci]`, which GitHub honours for the head commit of a pull request, so no run is created for it; (2) the first job is skipped when the run was started by `github-actions[bot]`, and the jobs that need it are skipped with it. The second guard is a safety net in case the first is ever removed.
 
-## What I changed from the legacy pipeline, and why
+## What changed from the legacy pipeline, and why
 
 | Legacy practice | Problem | Now |
 |---|---|---|
@@ -54,7 +54,7 @@ Actions are referenced by exact version tag (`uses: actions/checkout@v7.0.1`) an
 
 The stricter option is to pin each action to a 40-character commit SHA and each image to its `sha256` digest, because **a tag can be moved by whoever controls the repository or image**. This is not theoretical: on 19 March 2026 the version tags of Trivy's own GitHub Action were re-pointed to credential-stealing malware for about 12 hours, and two Trivy images on Docker Hub were replaced for about 10 hours. Aqua's advisory (GHSA-69fq-xp46-6x23) says that anyone referencing a **digest** or a **commit SHA** was not affected.
 
-I started with SHAs and digests and then simplified, because for this project the readability and the ability to explain every line outweighed the extra protection. In production I would pin by SHA and digest and let a bot (Dependabot or Renovate) propose the updates.
+The first version used SHAs and digests. It was then simplified to version tags, because for this project readability outweighed the extra protection. In production, pin by SHA and digest and let a bot (Dependabot or Renovate) propose the updates.
 
 **What this cost in the pipeline:** the `github-actions` rule pack of the gate flags every mutable action tag, so with version tags the scan failed with 11 findings, one per `uses:` line. Instead of dropping the whole pack (which also catches script injection in workflows) or annotating 11 lines, the Semgrep step excludes that one rule by its exact ID, with a comment saying why. Every other rule stays on (205 rules run). Pinning by SHA would let the exclusion be removed.
 
@@ -94,7 +94,7 @@ Consequence: the image the chart deploys today (`438bb74`) predates the `apk upg
 
 - **The first real run (PR #4) mostly worked, and found the loop above.** All three jobs were green on the first run: Semgrep, the build, Trivy and the push to GHCR (the package is now linked to the repository), and the manifest bump. The loop guards were validated locally only (the extracted commit step, the job conditions, `actionlint`, Semgrep); the first push after the fix will show whether GitHub behaves as documented. Everything else below was validated locally before that run. The `image` job's four `run:` steps were executed in order in a scratch repository (tag, build, Trivy and a stubbed push); the manifest step was run against a scratch repository with a local origin: the normal bump, a re-run of the whole workflow (no second commit), a docs-only commit pushed meanwhile (the bump still goes through), a change to the app after the image was built (refused, tag untouched), a missing built commit (refused), and a bot actor.
 - **One-time GHCR setting.** The existing `quote-api` package is not linked to this repository, so the workflow's `GITHUB_TOKEN` is not allowed to push to it. In the package's settings, connect the repository (or add it under "Manage Actions access" with the Write role). Without this, the push step of the `image` job fails with `denied`.
-- **The bump commit gets no checks (that is the point of `[skip ci]`).** GitHub documents that a skipped run leaves its checks pending, so if branch protection later requires status checks, the PR would be blocked until another commit is pushed without the skip string. The alternative is to push the bump with a GitHub App or a fine-grained token, which I did not do to avoid storing a long-lived credential. Today there is no branch protection, so nothing is blocked.
+- **The bump commit gets no checks (that is the point of `[skip ci]`).** GitHub documents that a skipped run leaves its checks pending, so if branch protection later requires status checks, the PR would be blocked until another commit is pushed without the skip string. The alternative is to push the bump with a GitHub App or a fine-grained token, which was not done, to avoid storing a long-lived credential. Today there is no branch protection, so nothing is blocked.
 - **The bump commit carries a person's name though automation made it.** It is attributed to `github.actor` (whoever triggered the run) with the `<id>+<name>@users.noreply.github.com` address, so the history is consistent with that person's own commits. The `ci:` prefix in the message is what marks it as automated. The alternative, the `github-actions[bot]` identity, is more honest about who made the commit but looks like a stranger in the history.
 - **After the workflow pushes, your local branch is behind.** Run `git pull` on the branch before pushing again, or the push is rejected.
 - **An image is pushed for every PR run that passes**, including PRs that are never merged. There is no cleanup policy yet; a retention rule on the package is the fix.
@@ -104,7 +104,7 @@ Consequence: the image the chart deploys today (`438bb74`) predates the `apk upg
 - **The tag is the PR head commit.** With a normal merge commit that commit stays in `main`'s history. With a squash merge it does not (the squash creates a new commit), though the image still traces back to the PR.
 - **Nothing runs after the merge.** The checks ran on the PR's head commit, not on the merge result, so if `main` moved in the meantime the combination is not re-checked.
 - **A workflow-only change runs the scan but not the image jobs**, so a mistake in the build or push steps is only found at the next PR that touches the app. The PR that brings this workflow includes a Dockerfile change, so it does trigger it.
-- **cosign signing (bonus) was cut.** Keyless signing needs a real Actions run with an OIDC token, so I could not test it, and I did not want untested steps in a gate. It is a small addition once the pipeline is green.
+- **cosign signing (bonus) was cut.** Keyless signing needs a real Actions run with an OIDC token, so it could not be tested here, and a gate should not contain untested steps. It is a small addition once the pipeline is green.
 - **Trivy ignores vulnerabilities that have no fix yet** (`--ignore-unfixed`), because nobody can act on them. Remove the flag to see them.
 - **Tags are movable.** See the section above: the actions and scanner images are referenced by version tag, and one Semgrep rule about this is switched off on purpose.
 - **Semgrep covers the whole repository, but only with the rule packs listed.** It does not scan Helm templates or shell scripts beyond what those packs include, and Trivy scans only the application image, not the toolbox image.

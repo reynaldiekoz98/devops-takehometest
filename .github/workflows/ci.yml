@@ -1,57 +1,53 @@
-# CI for quote-api (migrated from the legacy GitLab pipeline; see MIGRATION-NOTES.md).
+# CI for quote-api, migrated from the legacy GitLab pipeline (see MIGRATION-NOTES.md).
 #
-# This workflow is the CI half only. The CD half is ArgoCD (GitOps): it pulls from Git and deploys. This workflow
-# never touches the cluster; its last job only records the new image tag in Git.
+# CI only: ArgoCD is the CD half. It pulls from Git and deploys, so this workflow never touches the cluster.
+# Its last job only records the new image tag in Git.
 #
-# WHEN IT RUNS: on EVERY pull request into main.
-#   1. sast            : Semgrep scans the whole repository                      fails on ANY finding; always runs
-#                        It also checks whether the PR changed app/main.py or app/Dockerfile.
-#   2. image           : only if one of those two files changed: build the image with its FINAL tag, Trivy-scan that
-#                        image, and only if it passes push that same image to GHCR           needs sast
-#   3. update-manifest : set that tag in charts/quote-api (values + Chart)       needs image; commits to the PR branch
+# Runs on every pull request into main:
+#   1. sast             Semgrep scans the whole repository; any finding fails the run.
+#                       It also checks whether the PR changed app/main.py or app/Dockerfile.
+#   2. image            Only if one of those files changed: build the image with its final tag, scan it with
+#                       Trivy and, if it passes, push that same image to GHCR.
+#   3. update-manifest  Write the new tag into charts/quote-api and commit it to the PR branch.
 #
-# So a docs-only PR gets the scan and nothing else; a PR that touches the app gets the full pipeline. If the app
-# files did not change, jobs 2 and 3 are skipped (shown as "skipped", not failed).
-#   Note: the app check looks at the WHOLE PR diff, not at the latest push. So once a PR touches the app, every later
-#   commit on the branch builds again, including the commit this workflow pushes itself.
-#   Two guards stop that from looping (it did, on the first real run): the bump commit message carries [skip ci], and
-#   the first job is skipped when the run was started by github-actions[bot].
+# A PR that does not touch the image gets the scan only; jobs 2 and 3 show as skipped.
+# The image tag is the 7-character SHA of the PR head commit. After the merge, ArgoCD deploys that tag.
 #
-# The image is built once, tagged from the start with the 7-character SHA of the PR's head commit (the exact app
-# commit that was scanned), and the image that Trivy scanned is the image that gets pushed.
-# After the PR is merged, ArgoCD syncs the chart from main and deploys the new tag.
+# Loop guard: the check in job 1 looks at the whole PR diff, so once a PR touches the app every later push
+# (including the bump commit made by job 3) would start the pipeline again. Two guards prevent that: the
+# bump commit message contains [skip ci], and job 1 is skipped for runs started by github-actions[bot].
 name: CI
 
 on:
   pull_request:
     branches: [main]
 
-# Least privilege: read-only by default; the two jobs that need more ask for it explicitly.
+# Read-only by default; the jobs that need more ask for it.
 permissions:
   contents: read
 
-# A new commit on the PR cancels the older run.
+# A newer push to the same PR cancels the older run.
 concurrency:
   group: ci-${{ github.event.pull_request.number }}
   cancel-in-progress: true
 
 env:
-  # Scanners run as container images at a fixed version (never `latest`).
+  # Scanners run as container images with a fixed version (never `latest`).
   SEMGREP_IMAGE: semgrep/semgrep:1.185.0
   TRIVY_IMAGE: aquasec/trivy:0.76.2
 
 jobs:
   sast:
     name: 1. Scan the code (Semgrep)
-    # Loop guard #2: a run started by the workflow's own push is skipped, and so are the jobs that need this one.
+    # Loop guard: skip runs started by the workflow's own push (the jobs that need this one are skipped too).
     if: github.actor != 'github-actions[bot]'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     outputs:
       app_changed: ${{ steps.changes.outputs.app_changed }}
     steps:
-      # Check out the PR's real head commit, not the synthetic merge commit, so what is scanned, built and tagged
-      # is one commit that exists in the repository history.
+      # Check out the PR head commit, not the synthetic merge commit, so the scanned, built and tagged code is one
+      # real commit.
       - name: Checkout
         uses: actions/checkout@v7.0.1
         with:
@@ -59,8 +55,8 @@ jobs:
           fetch-depth: 0   # the next step compares the PR with its base commit
           persist-credentials: false
 
-      # Did this PR change the application image? Only these two files go into it. Compares the PR's head with the
-      # point where it branched off main (three dots), i.e. exactly the files the PR changes.
+      # Only these two files end up in the image. The three-dot diff lists exactly the files the PR changes,
+      # even if main has moved on.
       - name: Did the PR change app/main.py or app/Dockerfile?
         id: changes
         env:
@@ -77,12 +73,11 @@ jobs:
             echo "The app image is unchanged: the image jobs are skipped."
           fi
 
-      # No `continue-on-error` and no `|| true`: any finding fails the job (the legacy quality job could never fail).
-      # The whole repository is scanned. ONE rule is switched off on purpose: Semgrep's "mutable action tag" rule,
-      # because this project references actions by exact version tag (e.g. actions/checkout@v7.0.1) for readability.
-      # Pinning each action to a commit SHA is the stricter option and is what I would do in production (see
-      # MIGRATION-NOTES.md). Every other rule stays on. The one finding in toolbox/Dockerfile (runs as root, on purpose)
-      # is suppressed with a `# nosemgrep` comment that explains why, right above the line it covers.
+      # Hard gate: no `continue-on-error`, no `|| true`; any finding fails the job.
+      # One rule is switched off on purpose: "mutable action tag", because actions are referenced by version tag
+      # (for example actions/checkout@v7.0.1). Pinning to commit SHAs is stricter and is the better choice in
+      # production (see MIGRATION-NOTES.md). The root user in toolbox/Dockerfile is suppressed with a
+      # `# nosemgrep` comment next to the line it covers.
       - name: Semgrep (python, dockerfile, github-actions, secrets rule packs)
         run: |
           docker run --rm -v "$PWD:/src" -w /src "$SEMGREP_IMAGE" \
@@ -99,7 +94,7 @@ jobs:
     timeout-minutes: 30
     permissions:
       contents: read
-      packages: write   # needed only by the push step; the Trivy scan runs BEFORE the registry login
+      packages: write   # used only by the push step; the Trivy scan runs before the registry login
     outputs:
       tag: ${{ steps.vars.outputs.tag }}
     steps:
@@ -109,7 +104,7 @@ jobs:
           ref: ${{ github.event.pull_request.head.sha }}
           persist-credentials: false
 
-      # The tag is the 7-character git SHA of this commit (never `latest`). The registry path must be lowercase.
+      # Tag = 7-character git SHA (never `latest`). The registry path must be lowercase.
       - name: Work out the image name and tag
         id: vars
         run: |
@@ -118,8 +113,8 @@ jobs:
           echo "tag=${tag}" >> "$GITHUB_OUTPUT"
           echo "IMAGE_REF=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/quote-api:${tag}" >> "$GITHUB_ENV"
 
-      # Built once, with its final name from the start. amd64 only, on purpose (see MIGRATION-NOTES.md).
-      # The `source` label is what links the GHCR package to this repository.
+      # Built once with its final name. amd64 only (see MIGRATION-NOTES.md).
+      # The `source` label links the GHCR package to this repository.
       - name: Build the image (linux/amd64)
         run: |
           set -euo pipefail
@@ -128,14 +123,14 @@ jobs:
             --label "org.opencontainers.image.revision=$(git rev-parse HEAD)" \
             -t "$IMAGE_REF" app
 
-      # Gate: HIGH and CRITICAL vulnerabilities that already have a fix. Unfixed ones are ignored on purpose,
-      # because nobody can act on them; they stay visible in the Trivy report if you remove the flag.
+      # Gate: HIGH and CRITICAL vulnerabilities that already have a fix. Unfixed ones are ignored because nothing
+      # can be done about them yet (remove --ignore-unfixed to see them).
       - name: Trivy (fails on fixable HIGH/CRITICAL)
         run: |
           docker run --rm -v /var/run/docker.sock:/var/run/docker.sock "$TRIVY_IMAGE" \
             image --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 --no-progress "$IMAGE_REF"
 
-      # Pull requests from forks get a read-only token and cannot push; they still get the scan above.
+      # PRs from forks get a read-only token and cannot push; they still get the build and scan.
       - name: Log in to GHCR
         if: github.event.pull_request.head.repo.full_name == github.repository
         uses: docker/login-action@v4.8.0
@@ -157,18 +152,16 @@ jobs:
     permissions:
       contents: write   # to commit the new tag to the PR branch
     steps:
-      # Check out the PR branch itself (not a detached commit) so the change can be pushed back to it.
-      # Full history, because the check below compares the branch with the commit the image was built from.
+      # Check out the PR branch itself so the change can be pushed back. Full history is needed to compare the
+      # branch with the commit the image was built from.
       - name: Checkout the PR branch
         uses: actions/checkout@v7.0.1
         with:
           ref: ${{ github.event.pull_request.head.ref }}
           fetch-depth: 0
 
-      # Loop guard #1: the commit message ends with [skip ci], which GitHub honours for the HEAD commit of a pull
-      # request, so no run is created for this commit. (A commit pushed with GITHUB_TOKEN does NOT reliably avoid new
-      # runs: on the first real run it created one, held for approval. The path filter does not help either, because
-      # for pull_request it is evaluated against the whole PR diff.)
+      # Loop guard: [skip ci] in the commit message stops GitHub from starting a run for this commit.
+      # (A push made with GITHUB_TOKEN does not reliably avoid new runs on its own.)
       - name: Set the new image tag in the chart and commit it to the PR branch
         env:
           TAG: ${{ needs.image.outputs.tag }}
@@ -178,8 +171,8 @@ jobs:
           ACTOR_ID: ${{ github.actor_id }}
         run: |
           set -euo pipefail
-          # Only bump if the app is unchanged since the image was built. The branch may have newer commits (our own
-          # earlier bump, or a docs fix); what must not happen is the manifest pointing at an image of old app code.
+          # Only bump if app/ is unchanged since the image was built. Newer docs commits are fine; a manifest that
+          # points at an image of older app code is not.
           if ! git cat-file -e "${BUILT_COMMIT}^{commit}" 2>/dev/null || ! git diff --quiet "$BUILT_COMMIT" HEAD -- app; then
             echo "The app changed after this image was built; refusing to point the manifest at a stale image." >&2
             exit 1
@@ -192,7 +185,7 @@ jobs:
             echo "The manifest already uses ${TAG}; nothing to commit."
             exit 0
           fi
-          # The commit is attributed to whoever triggered the run, using GitHub's standard noreply address.
+          # The commit is attributed to whoever triggered the run, with GitHub's noreply address.
           git config user.name "$ACTOR"
           git config user.email "${ACTOR_ID}+${ACTOR}@users.noreply.github.com"
           git add charts/quote-api/values.yaml charts/quote-api/Chart.yaml

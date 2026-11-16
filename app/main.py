@@ -9,6 +9,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 PORT = int(os.environ.get("PORT", "8080"))
 WORK_SECONDS = float(os.environ.get("WORK_SECONDS", "0.1"))  # simulated CPU per /api/quote
+VERSION = os.environ.get("APP_VERSION", "version")  # git SHA, set at image build time (see Dockerfile)
 BUCKETS = (0.05, 0.1, 0.15, 0.25, 0.5, 1, 2.5, 5)
 
 QUOTES = [
@@ -93,7 +94,7 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/api/quote":
             status = 200
             burn_cpu(WORK_SECONDS)
-            self.send(200, json.dumps({"quote": random.choice(QUOTES), "pod": os.environ.get("HOSTNAME", "")}))
+            self.send(200, json.dumps({"quote": random.choice(QUOTES), "pod": os.environ.get("HOSTNAME", ""), "version": VERSION}))
         else:
             status, path = 404, "other"
             self.send(404, '{"error":"not found"}')

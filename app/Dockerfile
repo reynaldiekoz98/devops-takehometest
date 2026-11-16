@@ -11,6 +11,9 @@ RUN apk upgrade --no-cache
 RUN addgroup -g 10001 -S app && adduser -u 10001 -S -G app -H -s /sbin/nologin app
 WORKDIR /app
 COPY --from=build /src/main.py .
+# The git SHA of the commit this image is built from, returned by /api/quote. CI passes it with --build-arg.
+ARG GIT_SHA=version
+ENV APP_VERSION=$GIT_SHA
 USER 10001:10001
 EXPOSE 8080
 CMD ["python", "main.py"]

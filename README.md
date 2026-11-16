@@ -103,7 +103,7 @@ After the merge, ArgoCD deploys that tag. See `MIGRATION-NOTES.md`.
 | `cluster/traefik-ha.yaml` | Makes the built-in Traefik run 2 replicas so a node drain cannot cut the ingress |
 | `docker-compose.yml`, `toolbox/` | The harness: bootstrap job plus the toolbox container |
 | `scripts/` | The numbered task scripts (below) |
-| `troubleshoot/` | The provided files plus `fixed-app.yaml` (the fixed manifests) |
+| `troubleshoot/` | The provided files plus `fixed-app.yaml`: the 9 fixes, with the `default-deny` NetworkPolicy kept and three narrow allow rules added (details in `TROUBLESHOOTING.md`) |
 | `.github/workflows/ci.yml` | The GitHub Actions pipeline (Part 4) |
 | `TROUBLESHOOTING.md`, `MIGRATION-NOTES.md`, `OPS-ANSWERS.md`, `AI-USAGE.md` | Write-ups |
 
@@ -136,6 +136,8 @@ All scripts are idempotent. Run on the host, each one re-runs itself inside the 
 - **CI scope.** The Semgrep scan covers the whole repository on every pull request. The build and the Trivy scan run only when
   `app/main.py` or `app/Dockerfile` changed. Actions and scanner images are pinned by version tag, not by commit SHA, for
   readability; `MIGRATION-NOTES.md` explains the trade-off.
+- **NetworkPolicy stays default-deny (Part 3).** The policy is not deleted and the nodes are not touched. DNS, client to web, and
+  traffic into web each get one narrow allow rule scoped to exact pods and ports. `TROUBLESHOOTING.md` (Issue 7) shows how each blocked layer was found.
 - **Generous waits.** The scripts stop waiting on a step after a fixed time and say whether the image download is the likely cause.
 - **Cut, on purpose:** Parts 5 and 6 (one hands-on track done well), tests in CI, arm64 images (amd64 only), cosign signing,
   branch protection, a production AWS diagram.
